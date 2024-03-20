@@ -1,0 +1,265 @@
+---
+title: "16s分析报告"
+format: html
+editor: visual
+---
+
+```{r echo=FALSE}
+library(dplyr)
+library(stringr)
+
+
+min_depth_for_rare <- as.character(min_depth_for_rare)
+```
+
+## 测序数据质量控制
+
+首先使用`qiime tools import` 将fq测序文件导入qiime2（ version: 2023.5），如果提供引物序列，则使用`qiime cutadapt` 插件对测序数据进行质量控制，去除序列的引物信息。如果不清楚引物序列，也可以在后续的dada2步骤中切除序列开头的一定长度的序列，也可以达到去除引物序列的效果。本次分析中测序数据，forward链引物为 `r primer_f` ；reverse链引物为`r primer_r` 。（如果为数字，说明没有引物序列信息，这一步没有去除引物，引物将在后续的dada2步骤被去除，数值就是去除的长度）
+
+## 生成ASV特征表特征序列
+
+### dada2去噪
+
+使用`qiime dada2`插件进行去噪（denoises）生成ASV特征表（amplicon sequence variant (ASV) table），特征序列等信息
+
+`dada2` 有几个修剪序列的参数，对结果影响比较大，需要选择合适的参数达到比较好的去噪结果
+
+本次分析中，对于forward链，修剪掉开头`r trim_f` 长度的序列，修剪掉`r trunc_f`位置后面的序列。
+
+对于reverse链，修剪掉开头`r trim_r` 长度的序列，修剪掉`r trunc_r`位置后面的序列。
+
+### 过滤rare ASV
+
+当结果出现较多的rare ASV时，可以考虑去除这些rare ASV（丰度非常低或者在单个样本中出现的）。再进行后续分析。
+
+本次分析中使用`qiime feature-table filter-features` 插件对特征表进行过滤。其中`--p-min-frequency` 参数设置为 `r filter_freq` 。意味着如果某个ASV在全部样本中的丰度之和小于`r filter_freq` 那么该ASV将被过滤。\--p-min-sample 参数设置为 `r min_sample`
+
+该阈值如何确定：我们计算了每个ASV在全部样本的丰度之和，计算了全部ASV在全部样本的总丰度，随后过滤那些在总丰度中占比小于0.005%的ASV。
+
+如果阈值为0，则表示不进行过滤，但路径中也会生成名字带有filter的文件，这些名字有filter文件是dada2生成原始的文件的复制。
+
+### 抽平和标准化
+
+对过滤得到的特征表进行抽平。使用样本的最低深度进行抽平，其中样本的最低深度为`r min_depth_for_rare`。抽平后每个样本的的丰度都一致。可以用于绘制物种丰度堆叠图等分析。抽平在R平台下进行，使用vegan包的`rrarefy`函数。得到名字带有rare的txt文件
+
+对抽平后的特征表进行标准化，使用vegan包的`decostand`函数进行，标准化方法选择hellinger。得到名字带有norm的txt文件
+
+生成的结果如下所示
+
+```{r echo=FALSE}
+fs::dir_tree(dada2_result)
+```
+
+其中summary_feature_table文件夹下的文件，为后续获取物种注释后，基于抽平后的特征表，汇总得到的各个物种水平的丰度表（属、科、目、纲、门）。.qza .qzv为qiime2生成的qiime2格式的文件。这些也被称为qiime artifact，实际上是压缩文件。使用qiime2的`qiime tools export` 插件可以将其导出转化为相应的文本文件。export文件夹下的内容就是导出结果。
+
+## 进行物种注释
+
+物种注释使用`qiime feature-classifier` 插件，使用SILVA数据库（version silva-138）构建注释所需要的分类器，从而进行物种注释。
+
+生成的文件如下所示
+
+```{r echo=FALSE}
+fs::dir_tree(taxonomy_result)
+```
+
+-   taxonomy.tsv 是生成的原始的taxonomy文件，该文件有可能存在注释为NA的情况和Species水平 出现 "uncultured","human_gut","gut_metagenome","metagenome","unidentified"等。
+
+-   taxonomy_modified.tsv 针对这两种情况，进行了修饰。比如如Species为NA，但是Genus存在注释，那么NA将转化为s\_\_un_g\_xxx。如果Genus不存在注释，Order存在注释，则NA转化为s\_\_un_o\_xxx。对于出现 "uncultured","human_gut","gut_metagenome","metagenome","unidentified"等情况也进行想用的转换如 s\_\_uncultured_g\_xxxx。转换后得到taxonomy_modified.tsv。后续的相关分析都是使用该文件。
+
+## 构建系统发育树
+
+使用qiime2插件`align-to-tree-mafft-fasttree` 构建系统发育树（phylogenetic tree）。
+
+生成如下文件
+
+```{r echo=FALSE}
+fs::dir_tree(phylogenetic_tree_result)
+```
+
+生成的有根的系统发育树文件（rooted-tree.qza）用来后续alpha多样性分析中faith-pd指标的计算。
+
+## alpha多样性分析
+
+使用`qiime diversity alpha-rarefaction` 插件进行抽样和alpha多样性指标（observed_features、shannon、chao1、simpson、faith_pd）的计算，从而得到不同抽样深度下alpha多样性指标的值。随后在R平台使用ggplot2包绘制稀释曲线图。
+
+Alpha多样性分析用于研究单个生态系统、群落或样本内的多样性，以帮助理解一个特定环境或生境中物种的多样性和丰富度。与beta多样性分析不同，alpha多样性关注的是一个样本内的群落多样性，而不是不同样本之间的差异。
+
+### 稀释曲线
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(alpha_diversity_result,"/alpha_rarefaction_curves_plot.pdf")) 
+```
+
+稀释曲线反映了不同抽样深度下alpha多样性指标变化，当曲线趋于平缓，说明测序深度足够，更深的测序深度对于发现新物种作用不大。反之，处于比较陡峭，则说明深度可能不足。
+
+### alpha多样性指标箱线图
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(alpha_diversity_result,"/alpha_rarefaction_boxplot.pdf")) 
+```
+
+该箱线图展示了在最大的抽样深度（最大抽样深度为样本的最低深度，也就是`r min_depth_for_rare` )下的alpha多样性指标在不同分组之间的差异情况。
+
+该分析生成的结果文件如下所示
+
+```{r echo=FALSE}
+fs::dir_tree(alpha_diversity_result)
+```
+
+## beta多样性分析
+
+在本次分析中，我们执行了ANOSIM、PCA、PCOA、NMDS、这几个分析。分析使用标准化过的特征表。
+
+### ANOSIM
+
+分析使用`vagan`包的`anosim`函数，距离计算方法为Bray-Curtis。
+
+ANOSIM，相似性分析，是用于比较不同样本组之间的相似性或差异性的统计检验。它基于距离矩阵计算各组内部的相似性与各组之间的相似性之比例。
+
+结果如图所示
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(beta_diversity_result,"/beta_diversity_anosim_plot.pdf"))
+
+```
+
+结果中的R值表示组间差异和组内差异的比值，范围在-1到1之间。R值接近1表示组间差异大，接近-1表示组内差异大，接近0表示组间和组内差异差不多。p值则表示显著性水平。
+
+### PCA
+
+PCA，主成分分析，一种常见的降维方法，不基于距离矩阵，直接对特征表进行降维。
+
+分析使用的是`prcomp`函数
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(beta_diversity_result,"/beta_diversity_pca_plot.pdf"))
+
+```
+
+### PCoA
+
+分析使用`phyloseq`包的`ordinate`函数，距离计算方法为Bray-Curtis。
+
+PCoA，主坐标分析，也是一种降维方法，通常用于展示生物多样性数据中样本或群落的相似性和差异性。类似于PCA，但使用距离矩阵而不是原始数据（特征表）。
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(beta_diversity_result,"/beta_diversity_pcoa_plot.pdf"))
+```
+
+### NMDS
+
+分析同样也使用`phyloseq`包的`ordinate`函数完成，距离计算方法为Bray-Curtis。
+
+NMDS ，非度量多维缩放，是一种基于样本距离矩阵的 MDS 分析方法。在进行NMDS之前，首先需要计算不同样本之间的距离矩阵，通常使用一种距离度量方法，如Bray-Curtis距离、Jaccard距离、Euclidean距离等。这个距离矩阵描述了样本之间的相异性程度。
+
+NMDS试图将高维的距离矩阵数据降维到二维或三维空间。它通过迭代的方式，尝试找到一个低维度的表示，以便在新的空间中尽量保持样本之间的相对距离关系。这意味着在新的空间中，距离矩阵中的距离应该反映出样本之间的相似性。
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(beta_diversity_result,"/beta_diversity_nmds_plot.pdf"))
+```
+
+### PERMANOVA
+
+分析使用`vagan`包的`adonis`函数，距离计算方法为Bray-Curtis。
+
+PERMANOVA，基于距离矩阵的方差置换多元分析，PERMANOVA（Permutational Multivariate Analysis of Variance）是一种用于比较多个样本组之间的多元方差分析方法，通常用于生态学和多样性研究中，以确定不同样本组之间的差异是否显著。
+
+PERMANOVA首先需要一个样本之间的距离矩阵，该矩阵描述了样本之间的相似性或差异性。常见的距离度量方法包括Bray-Curtis距离、Jaccard距离、UniFrac距离等。随后根据样本的分组信息，指定距离矩阵作为响应变量，分组作为解释变量，然后进行PERMANOVA分析。
+
+PCA、PCoA、NMDS分析结果图右上角展示的就是PERMANOVA分析得到的R方值和p值。p值用来判断不同组别之间是否存在显著的差异，R²值用来评估解释变量对于响应变量的影响程度。
+
+bea多样性分析的结果文件如下所示
+
+```{r echo=FALSE}
+fs::dir_tree(beta_diversity_result)
+```
+
+## LEfSe分析
+
+LEfSe (Linear discriminant analysis effect size，线性判别分析效应大小)是由Huttenhower小组开发的一种工具，使用相对丰度用于在两个或两个以上的群体之间寻找生物标志物。
+
+LEfSe分析可以直接对门/纲/目/科/属/种的各级分类水平同时进行统计检验和差异分析。同时，LEfSe更强调寻找分组之间稳健的差异物种，即标志物种（Biomarker）。
+
+LEfSe分析的步骤如下:
+
+-   A. 首先在多组样本中采用的非参数因子Kruskal-Wallis秩和检验检测不同分组间丰度差异显著的物种；
+
+-   B. 再利用Wilcoxon秩和检验检查在显著差异物种类中的所有亚种(subclass)比较是否都趋同于同一分类级别；（我们一般只用group的分组，不存在subclass信息，所以正常情况下这一步不会进行）
+
+-   C. 最后用线性判别分析（LDA）对数据进行降维和评估差异显著的物种的影响力（即LDA score）
+
+对于分析结果，使用 p\<0.05，LDA score \> `r lda` 筛选差异物种\
+\
+
+绘制LDA分数条形图
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(lefse_result,"/LDA_score_plot.pdf"))
+```
+
+该图展示了筛选得到的差异物种的LDA分数水平。颜色表明了差异物种在哪个分组中是富集的（即具有更高的丰度）\
+\
+
+绘制物种分类学分枝图（Cladogram）
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(lefse_result,"/lefse_Cladogram.pdf"))
+```
+
+该图展示了差异物种的在各个物种分类水平所属的类别，圆圈内到外，表示了从门水平到属（种）水平的分类。颜色表示差异物种富集的分组。
+
+LEfSe分析的结果文件如下所示
+
+```{r echo=FALSE}
+fs::dir_tree(lefse_result)
+```
+
+```{r echo=FALSE}
+
+if (use_adjp == "F") {
+  text = "pvalue"
+}else{
+  text = "校正后的pvalue"
+}
+
+```
+
+\
+
+## 其他结果
+
+### 韦恩图
+
+统计每个分组中存在的ASV，绘制venn图，可以直观看出不同分组中ASV组成的相似情况
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+knitr::include_graphics(paste0(other_result,"/feature_seq_venn.pdf"))
+```
+
+### 物种丰度堆叠图
+
+根据物种注释结果，统计各个物种分类水平上（属、科、目、纲、门）物种的相对丰度，绘制堆叠条形图进行展示。
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+f <- list.files(paste0(other_result,"/taxon_stack_barplot/sample/"))
+f <- f[3]
+knitr::include_graphics(paste0(other_result,"/taxon_stack_barplot/sample/",f))
+```
+
+图片展示了在属水平上，每个样本的物种组成比例，选择丰富最高的前20的物种进行展示。\
+\
+
+```{r echo=FALSE,out.width = "100%",out.height= "400pt"}
+f <- list.files(paste0(other_result,"/taxon_stack_barplot/group/"))
+f <- f[3]
+knitr::include_graphics(paste0(other_result,"/taxon_stack_barplot/group/",f))
+```
+
+图片展示了在属水平上，每个分组的物种组成比例，选择丰富最高的前20的物种进行展示。\
+\
+
+全部结果文件如下：
+
+```{r echo=FALSE}
+fs::dir_tree(other_result)
+```
